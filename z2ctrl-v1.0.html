@@ -1,0 +1,1284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Z2 CTRL v1.0</title>
+<link rel="manifest" href="data:application/json,{}">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#111318">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&family=Inter:wght@400;600;700;800;900&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter',system-ui,sans-serif;background:#111318;color:#e2e8f0;-webkit-font-smoothing:antialiased;overflow-x:hidden;min-height:100vh}
+@keyframes liqA{0%,100%{transform:translateX(-3px)}50%{transform:translateX(3px)}}
+@keyframes liqB{0%,100%{transform:translateX(4px)}50%{transform:translateX(-4px)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeOut{from{opacity:1}to{opacity:0}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
+.toast{position:fixed;bottom:120px;left:50%;transform:translateX(-50%);background:#1e293bee;border:1px solid #334155;border-radius:12px;padding:12px 24px;font-size:15px;color:#fff;max-width:340px;text-align:center;animation:fadeIn 0.4s ease;z-index:50;pointer-events:none;font-weight:600}
+.toast.out{animation:fadeOut 0.5s ease forwards}
+input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+input[type=number]{-moz-appearance:textfield}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback,useMemo}=React;
+const MONO="'JetBrains Mono',monospace";
+
+// ═══════════════════════════════════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════
+const ZC=["#64748b","#94a3b8","#3b82f6","#22c55e","#f59e0b","#ef4444"];
+const ZN=["—","ZONE 1","ZONE 2","ZONE 3","ZONE 4","ZONE 5"];
+const BLE={HR:0x180d,HR_CH:0x2a37,PWR:0x1818,PWR_CH:0x2a63,FTMS:0x1826,FTMS_CTRL:"00002ad9-0000-1000-8000-00805f9b34fb"};
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const avg=a=>a.length?a.reduce((s,v)=>s+v,0)/a.length:0;
+const fmt=s=>{const h=Math.floor(s/3600),m=Math.floor(s%3600/60),sc=s%60;return h?`${h}:${String(m).padStart(2,"0")}:${String(sc).padStart(2,"0")}`:`${String(m).padStart(2,"0")}:${String(sc).padStart(2,"0")}`};
+
+const DEF_CFG={maxHR:174,restHR:54,ftp:162,controlMode:"hr",z2PowerLow:121,z2PowerHigh:150,
+  resistanceStep:3,adjustIntervalMs:4000,rideDuration:60,
+  voiceEnabled:true,voiceRate:0.9,voiceVolume:1.0,cueMins:4};
+
+// ═══════════════════════════════════════════════════════════════════════
+// ZONES (Karvonen)
+// ═══════════════════════════════════════════════════════════════════════
+function mkZones(mx,rest){
+  const hrr=mx-rest;
+  return[
+    {zone:1,lo:Math.round(rest+hrr*0.50),hi:Math.round(rest+hrr*0.60),color:ZC[1]},
+    {zone:2,lo:Math.round(rest+hrr*0.60),hi:Math.round(rest+hrr*0.70),color:ZC[2]},
+    {zone:3,lo:Math.round(rest+hrr*0.70),hi:Math.round(rest+hrr*0.80),color:ZC[3]},
+    {zone:4,lo:Math.round(rest+hrr*0.80),hi:Math.round(rest+hrr*0.90),color:ZC[4]},
+    {zone:5,lo:Math.round(rest+hrr*0.90),hi:mx,color:ZC[5]},
+  ];
+}
+function getZone(hr,zones){
+  if(hr<=0)return{zone:0,lo:0,hi:0,color:ZC[0],pct:0};
+  for(const z of zones)if(hr>=z.lo&&hr<=z.hi)return{...z,pct:(hr-z.lo)/Math.max(1,z.hi-z.lo)};
+  if(hr<zones[0].lo)return{zone:0,lo:0,hi:zones[0].lo,color:ZC[0],pct:hr/zones[0].lo};
+  return{zone:5,...zones[4],pct:1};
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SPEECH CUES
+// ═══════════════════════════════════════════════════════════════════════
+const TECH=[
+  "Drop your shoulders away from your ears. Let the tension go.",
+  "Relax your grip. Light hands on the bars.",
+  "Unclench your jaw. Let your face relax.",
+  "Hinge from the hips. Keep your spine neutral.",
+  "Engage your core. Think tall through the chest.",
+  "Relax your neck. Eyes forward, not down.",
+  "Smooth circles. Think about scraping mud off your shoe at the bottom of the stroke.",
+  "Even pressure through the full pedal stroke. No dead spots.",
+  "Keep your feet flat on the pedals.",
+  "Constant pressure on the cranks. Smooth and steady.",
+  "Breathe from your belly, not your chest.",
+  "Exhale fully. The inhale takes care of itself.",
+  "Open your chest for better oxygen exchange.",
+  "You should be able to speak in full sentences right now. If you can't, ease off.",
+  "Check your elbows. Soft bend, not locked out.",
+  "Heavy hips in the saddle. Let your weight drop through your sit bones.",
+  "Scan your body from head to toe. Release anything that's tight.",
+];
+const ENCR=[
+  "Strong legs. Quiet upper body. Let the bike do the work.",
+  "Find your rhythm and settle into it. You own this pace.",
+  "Relax your hands. Relax your face. The power comes from your legs.",
+  "Breathe deep. You've got more in the tank than you think.",
+  "The riders who go the distance are the ones who showed up on days like this.",
+  "Discomfort is temporary. Fitness is cumulative.",
+  "You're not training for today. You're training for the ride you haven't done yet.",
+  "Boredom is the price of endurance. Pay it gladly.",
+  "The Nero doesn't care how you feel. Neither does the road to Oslo.",
+  "Halfway there. You're stronger now than when you started this journey.",
+  "Check in with yourself. Are you comfortable? Good. Stay there.",
+  "This is the pace that eats up kilometres on a long ride.",
+  "Lillehammer to Oslo. You're building that ride right now.",
+  "The last twenty minutes is where the adaptation happens.",
+  "Your legs know the way. Let them turn.",
+  "Almost done. Finish what you started.",
+  "This is the part where most people stop. You're not most people.",
+  "In the silence of the universe, you are on your bike. Be the bike.",
+  "You have crossed oceans of time to be on this bike.",
+];
+const HYDRA=["Time for a drink. Small sips.","Take a sip of water now.","Stay hydrated. Drink something."];
+const Z2W=["Ease off. You're above zone 2.","Dial it back. Let your heart rate settle.","Too high. Reduce your effort and breathe."];
+
+// ═══════════════════════════════════════════════════════════════════════
+// STORAGE (localStorage)
+// ═══════════════════════════════════════════════════════════════════════
+const SK={cfg:"z2c-cfg-v1",hist:"z2ctrl-history",cf:"z2ctrl-for-claudefit",pin:"z2ctrl-pin"};
+const ls={
+  get(k,fb){try{const v=localStorage.getItem(k);return v?JSON.parse(v):fb}catch{return fb}},
+  set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}},
+  getRaw(k){return localStorage.getItem(k)||null},
+  setRaw(k,v){localStorage.setItem(k,v)},
+  rm(k){localStorage.removeItem(k)},
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// VOICE (MP3 files primary, system TTS fallback)
+// ═══════════════════════════════════════════════════════════════════════
+// Build text → filename map
+const CUE_MAP=new Map();
+TECH.forEach((t,i)=>CUE_MAP.set(t,`tech-${String(i+1).padStart(2,"0")}`));
+ENCR.forEach((t,i)=>CUE_MAP.set(t,`enc-${String(i+1).padStart(2,"0")}`));
+HYDRA.forEach((t,i)=>CUE_MAP.set(t,`hyd-${String(i+1).padStart(2,"0")}`));
+Z2W.forEach((t,i)=>CUE_MAP.set(t,`z2w-${String(i+1).padStart(2,"0")}`));
+
+const audioCache=new Map();
+
+async function speakMP3(text,vol=1.0){
+  const file=CUE_MAP.get(text);
+  if(!file)return false;
+  const url=`cues/${file}.mp3`;
+  // Session cache
+  if(audioCache.has(url)){
+    try{const a=new Audio(audioCache.get(url));a.volume=vol;await a.play();await new Promise(r=>{a.onended=r;a.onerror=r});return true}catch{}
+  }
+  try{
+    const r=await fetch(url);
+    if(!r.ok)return false;
+    const blob=await r.blob();
+    const blobUrl=URL.createObjectURL(blob);
+    audioCache.set(url,blobUrl);
+    const a=new Audio(blobUrl);a.volume=vol;
+    await a.play();
+    await new Promise(res=>{a.onended=res;a.onerror=res});
+    return true;
+  }catch{return false}
+}
+
+// System TTS fallback
+let sysVoices=[],selSysVoice=null;
+function loadSysVoices(){
+  if(!window.speechSynthesis)return;
+  const refresh=()=>{sysVoices=speechSynthesis.getVoices().filter(v=>/en/i.test(v.lang));selSysVoice=sysVoices.find(v=>/en.*gb/i.test(v.lang))||sysVoices.find(v=>v.name.includes("Google"))||sysVoices[0]||null;};
+  refresh();speechSynthesis.onvoiceschanged=refresh;
+}
+loadSysVoices();
+
+function speakSys(text,rate=0.9,vol=1.0){
+  if(!window.speechSynthesis||!selSysVoice)return;
+  speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(text);
+  u.voice=selSysVoice;u.rate=rate;u.pitch=1;u.volume=vol;
+  speechSynthesis.speak(u);
+}
+
+async function speak(text,rate,vol=1.0){
+  const ok=await speakMP3(text,vol);
+  if(!ok)speakSys(text,rate,vol);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// BLE HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+function buildRC(){const b=new ArrayBuffer(1);new DataView(b).setUint8(0,0);return b}
+function buildStart(){const b=new ArrayBuffer(1);new DataView(b).setUint8(0,7);return b}
+function buildRes(p){const b=new ArrayBuffer(3),v=new DataView(b);v.setUint8(0,4);v.setInt16(1,Math.round(p*10),true);return b}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SHARED UI COMPONENTS
+// ═══════════════════════════════════════════════════════════════════════
+const Card=({children,style})=><div style={{background:"#161a23",borderRadius:12,padding:"14px 18px",marginBottom:12,...style}}>{children}</div>;
+const Label=({children})=><div style={{fontSize:11,color:"#64748b",letterSpacing:"1.5px",marginBottom:10,fontWeight:600}}>{children}</div>;
+const Dot=({on})=><span style={{width:12,height:12,borderRadius:"50%",display:"inline-block",marginRight:12,background:on?"#22c55e":"#334155",boxShadow:on?"0 0 10px #22c55e80":"none"}}/>;
+const Back=({onClick})=><button onClick={onClick} style={{background:"none",border:"1px solid #334155",color:"#94a3b8",padding:"8px 16px",borderRadius:8,fontSize:13,cursor:"pointer",fontFamily:"inherit"}}>← Back</button>;
+const Header=({title,onBack,right})=><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}><span style={{fontSize:20,fontWeight:800,color:"#f59e0b",fontFamily:MONO}}>{title}</span><div style={{display:"flex",gap:8,alignItems:"center"}}>{right}{onBack&&<Back onClick={onBack}/>}</div></div>;
+const NumField=({label,value,onChange,unit,step})=>(
+  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+    <span style={{fontSize:13,color:"#94a3b8"}}>{label}</span>
+    <div style={{display:"flex",alignItems:"center",gap:6}}>
+      <input type="number" step={step||1} value={value} onChange={e=>onChange(Number(e.target.value))} style={{width:76,padding:"6px 10px",borderRadius:6,border:"1px solid #334155",background:"#0a0e17",color:"#e2e8f0",fontSize:15,fontFamily:MONO,textAlign:"right"}}/>
+      <span style={{fontSize:12,color:"#64748b",width:34}}>{unit}</span>
+    </div>
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════════════════════
+// PIN GATE
+// ═══════════════════════════════════════════════════════════════════════
+function PinGate({onUnlock}){
+  const[pin,setPin]=useState("");
+  const[err,setErr]=useState(false);
+  const saved=ls.getRaw(SK.pin);
+  const handle=n=>{
+    if(n==="←"){setPin(p=>p.slice(0,-1));setErr(false);return}
+    if(pin.length>=4)return;
+    const next=pin+n;
+    setPin(next);
+    if(next.length===4){
+      if(next===saved)onUnlock();
+      else{setErr(true);setTimeout(()=>{setPin("");setErr(false)},800)}
+    }
+  };
+  return(
+    <div style={{maxWidth:400,margin:"0 auto",padding:"60px 20px",textAlign:"center"}}>
+      <div style={{fontSize:28,fontWeight:900,color:"#f59e0b",fontFamily:MONO,marginBottom:4}}>Z2 CTRL</div>
+      <div style={{fontSize:10,color:"#475569",letterSpacing:"3px",marginBottom:40}}>ENTER PIN</div>
+      <div style={{display:"flex",justifyContent:"center",gap:12,marginBottom:24}}>
+        {[0,1,2,3].map(i=><div key={i} style={{width:48,height:56,borderRadius:10,border:`2px solid ${err?"#ef4444":pin.length>i?"#22c55e":"#334155"}`,background:"#161a23",display:"flex",alignItems:"center",justifyContent:"center",fontSize:28,fontWeight:800,color:err?"#ef4444":"#f59e0b"}}>{pin[i]?"●":""}</div>)}
+      </div>
+      {err&&<div style={{color:"#ef4444",fontSize:13,marginBottom:16}}>Wrong PIN</div>}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,maxWidth:240,margin:"0 auto"}}>
+        {[1,2,3,4,5,6,7,8,9,null,0,"←"].map((n,i)=>n===null?<div key={i}/>:
+          <button key={i} onClick={()=>handle(n)} style={{width:64,height:52,borderRadius:10,border:"none",background:"#1e293b",color:"#e2e8f0",fontSize:22,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>{n}</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PIN SET (inline in Settings)
+// ═══════════════════════════════════════════════════════════════════════
+function PinSet(){
+  const[pin,setPin]=useState("");const[done,setDone]=useState(false);
+  if(done)return<div style={{fontSize:13,color:"#22c55e"}}>✓ PIN set. Takes effect next launch.</div>;
+  return(<div>
+    <div style={{display:"flex",justifyContent:"center",gap:8,marginBottom:12}}>
+      {[0,1,2,3].map(i=><div key={i} style={{width:36,height:42,borderRadius:8,border:`2px solid ${pin.length>i?"#22c55e":"#334155"}`,background:"#0a0e17",display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,fontWeight:800,color:"#f59e0b"}}>{pin[i]?"●":""}</div>)}
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:4,maxWidth:180,margin:"0 auto"}}>
+      {[1,2,3,4,5,6,7,8,9,null,0,"←"].map((n,i)=>n===null?<div key={i}/>:
+        <button key={i} onClick={()=>{
+          if(n==="←"){setPin(p=>p.slice(0,-1));return}
+          if(pin.length>=4)return;
+          const next=pin+n;setPin(next);
+          if(next.length===4){ls.setRaw(SK.pin,next);setDone(true)}
+        }} style={{height:38,borderRadius:6,border:"none",background:"#1e293b",color:"#e2e8f0",fontSize:16,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>{n}</button>
+      )}
+    </div>
+  </div>);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SETTINGS PAGE
+// ═══════════════════════════════════════════════════════════════════════
+function SettingsPage({cfg,setCfg,zones,onBack}){
+  return(
+    <div style={{maxWidth:480,margin:"0 auto",padding:"20px 16px"}}>
+      <Header title="Settings" onBack={onBack}/>
+      <Card><Label>ATHLETE</Label>
+        <NumField label="Max HR" value={cfg.maxHR} onChange={v=>setCfg(c=>({...c,maxHR:v}))} unit="bpm"/>
+        <NumField label="Resting HR" value={cfg.restHR} onChange={v=>setCfg(c=>({...c,restHR:v}))} unit="bpm"/>
+        <NumField label="FTP" value={cfg.ftp} onChange={v=>setCfg(c=>({...c,ftp:v}))} unit="W"/>
+      </Card>
+      <Card><Label>Z2 POWER</Label>
+        <NumField label="Low" value={cfg.z2PowerLow} onChange={v=>setCfg(c=>({...c,z2PowerLow:v}))} unit="W"/>
+        <NumField label="High" value={cfg.z2PowerHigh} onChange={v=>setCfg(c=>({...c,z2PowerHigh:v}))} unit="W"/>
+      </Card>
+      <Card><Label>AUTO CONTROL</Label>
+        <NumField label="Adjust interval" value={cfg.adjustIntervalMs} onChange={v=>setCfg(c=>({...c,adjustIntervalMs:v}))} unit="ms"/>
+        <NumField label="Resistance step" value={cfg.resistanceStep} onChange={v=>setCfg(c=>({...c,resistanceStep:v}))} unit="%"/>
+      </Card>
+      <Card><Label>VOICE COACH</Label>
+        <div style={{fontSize:11,color:"#475569",marginBottom:14}}>Pre-recorded John Doe cues from cues/ folder. Falls back to system voice if file missing.</div>
+        <NumField label="Cue interval" value={cfg.cueMins} onChange={v=>setCfg(c=>({...c,cueMins:v}))} unit="min"/>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
+          <span style={{fontSize:13,color:"#94a3b8"}}>Volume</span>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <input type="range" min="0" max="1" step="0.1" value={cfg.voiceVolume} onChange={e=>setCfg(c=>({...c,voiceVolume:parseFloat(e.target.value)}))} style={{width:100,accentColor:"#f59e0b"}}/>
+            <span style={{fontSize:13,color:"#e2e8f0",fontFamily:MONO,width:30,textAlign:"right"}}>{Math.round(cfg.voiceVolume*100)}%</span>
+          </div>
+        </div>
+        <NumField label="Fallback speech rate" value={cfg.voiceRate} onChange={v=>setCfg(c=>({...c,voiceRate:v}))} unit="" step={0.1}/>
+        <button onClick={()=>speak(TECH[0],cfg.voiceRate,cfg.voiceVolume)} style={{width:"100%",padding:"10px 0",borderRadius:6,border:"1px solid #334155",background:"#1e293b",color:"#94a3b8",fontSize:13,cursor:"pointer",fontFamily:"inherit",marginTop:4}}>🔊 Test Voice</button>
+      </Card>
+      <Card><Label>HR ZONES (Karvonen: Max {cfg.maxHR} Rest {cfg.restHR})</Label>
+        {zones.map(z=><div key={z.zone} style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+          <div style={{width:12,height:12,borderRadius:"50%",background:z.color}}/><span style={{fontSize:13,color:"#94a3b8",width:55,fontFamily:MONO}}>Zone {z.zone}</span><span style={{fontSize:13,color:"#64748b",fontFamily:MONO}}>{z.lo}–{z.hi} bpm</span>
+        </div>)}
+      </Card>
+      <Card>
+        <Label>PIN LOCK</Label>
+        {ls.getRaw(SK.pin)?<>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+            <span style={{fontSize:13,color:"#22c55e"}}>PIN enabled</span>
+            <button onClick={()=>{if(confirm("Remove PIN lock?")){ls.rm(SK.pin);location.reload()}}} style={{padding:"6px 14px",borderRadius:6,border:"1px solid #334155",background:"none",color:"#ef4444",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Remove PIN</button>
+          </div>
+        </>:<>
+          <div style={{fontSize:12,color:"#64748b",marginBottom:8}}>No PIN set. Tap below to add one.</div>
+          <PinSet/>
+        </>}
+      </Card>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HISTORY PAGE
+// ═══════════════════════════════════════════════════════════════════════
+function HistoryPage({history,setHistory,onBack}){
+  return(
+    <div style={{maxWidth:480,margin:"0 auto",padding:"20px 16px"}}>
+      <Header title="History" onBack={onBack}/>
+      {history.length===0?<div style={{color:"#475569",fontSize:14,textAlign:"center",marginTop:40}}>No rides yet</div>:
+        history.map((r,i)=>{
+          const d=new Date(r.date);
+          const z2pct=r.zoneSecs?Math.round(r.zoneSecs[2]/(r.activeTime||1)*100):0;
+          return(
+            <Card key={i} style={{border:"1px solid #1e293b"}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                <span style={{fontSize:14,fontWeight:700,fontFamily:MONO}}>{d.toLocaleDateString()}</span>
+                <span style={{fontSize:13,color:"#64748b",fontFamily:MONO}}>{fmt(r.activeTime||r.duration)}</span>
+              </div>
+              <div style={{display:"flex",gap:16,fontSize:13}}>
+                <span style={{color:"#f59e0b"}}>{r.avgPower}W</span>
+                <span style={{color:"#ef4444"}}>{r.avgHR}bpm</span>
+                <span>{r.avgCadence}rpm</span>
+                <span style={{color:"#3b82f6"}}>{z2pct}% Z2</span>
+              </div>
+              <div style={{display:"flex",gap:16,fontSize:12,marginTop:4}}>
+                {r.ef&&<span style={{color:"#22c55e"}}>EF {r.ef}</span>}
+                {r.distance&&<span style={{color:"#94a3b8"}}>{r.distance}km</span>}
+                {r.avgSpeed&&<span style={{color:"#94a3b8"}}>{r.avgSpeed}km/h</span>}
+                {r.sweatLossKg&&<span style={{color:"#3b82f6"}}>{Math.round(r.sweatLossKg*1000)}ml</span>}
+              </div>
+              {r.zones&&r.zones.length>0&&<div style={{display:"flex",gap:1,marginTop:8,height:6,borderRadius:3,overflow:"hidden"}}>
+                {r.zones.map((z,j)=><div key={j} style={{flex:1,background:ZC[z]||"#334155"}}/>)}
+              </div>}
+            </Card>
+          );
+        })
+      }
+      {history.length>0&&<button onClick={()=>{if(confirm("Clear all ride history?")){setHistory([]);ls.set(SK.hist,[])}}} style={{width:"100%",marginTop:8,padding:"10px 0",borderRadius:8,border:"1px solid #334155",background:"none",color:"#ef4444",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>Clear History</button>}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DIAG PAGE
+// ═══════════════════════════════════════════════════════════════════════
+function DiagPage({onBack}){
+  const[stagesDev,setStagesDev]=useState(null);const[neroDev,setNeroDev]=useState(null);
+  const[stagesP,setStagesP]=useState(0);const[neroP,setNeroP]=useState(0);const[stagesCad,setStagesCad]=useState(0);
+  const[log,setLog]=useState([]);const[running,setRunning]=useState(false);
+  const timerRef=useRef(null);const spRef=useRef(0);const npRef=useRef(0);const cadRef=useRef(0);const crankRef=useRef({r:null,t:null});
+  spRef.current=stagesP;npRef.current=neroP;cadRef.current=stagesCad;
+
+  const connectStages=async()=>{try{
+    const d=await navigator.bluetooth.requestDevice({filters:[{services:[BLE.PWR]}]});
+    const s=await(await d.gatt.connect()).getPrimaryService(BLE.PWR);
+    const c=await s.getCharacteristic(BLE.PWR_CH);await c.startNotifications();
+    c.addEventListener("characteristicvaluechanged",e=>{
+      const v=e.target.value,fl=v.getUint16(0,true),w=Math.max(0,v.getInt16(2,true));
+      setStagesP(w);
+      if(fl&0x20){let o=4;if(fl&1)o+=1;if(fl&4)o+=2;if(fl&0x10)o+=6;if(v.byteLength>=o+4){
+        const cr=v.getUint16(o,true),ct=v.getUint16(o+2,true),p=crankRef.current;
+        if(p.r!==null){let dR=cr-p.r;if(dR<0)dR+=65536;let dT=ct-p.t;if(dT<0)dT+=65536;
+        if(dT>0&&dR>0){const rpm=Math.round((dR/(dT/1024))*60);if(rpm>0&&rpm<200)setStagesCad(rpm)}}
+        crankRef.current={r:cr,t:ct};
+      }}
+    });
+    setStagesDev(d.name||"Stages");
+  }catch(e){setStagesDev("FAIL: "+e.message)}};
+
+  const connectNero=async()=>{try{
+    const d=await navigator.bluetooth.requestDevice({filters:[{services:[BLE.FTMS]}],optionalServices:[BLE.PWR,BLE.FTMS]});
+    const srv=await d.gatt.connect();
+    try{
+      const ps=await srv.getPrimaryService(BLE.PWR);const c=await ps.getCharacteristic(BLE.PWR_CH);
+      await c.startNotifications();c.addEventListener("characteristicvaluechanged",e=>{setNeroP(Math.max(0,e.target.value.getInt16(2,true)))});
+      setNeroDev(d.name+" (Power)");
+    }catch{
+      try{
+        const fs=await srv.getPrimaryService(BLE.FTMS);const ib=await fs.getCharacteristic("00002ad2-0000-1000-8000-00805f9b34fb");
+        await ib.startNotifications();ib.addEventListener("characteristicvaluechanged",e=>{
+          const v=e.target.value,fl=v.getUint16(0,true);let off=2;
+          if(!(fl&0x01))off+=2;if(fl&0x02)off+=2;if(fl&0x04)off+=2;if(fl&0x08)off+=2;
+          if(fl&0x40&&v.byteLength>=off+2)setNeroP(Math.max(0,v.getInt16(off,true)));
+        });
+        setNeroDev(d.name+" (FTMS)");
+      }catch{setNeroDev("FAIL: no power")}
+    }
+  }catch(e){setNeroDev("FAIL: "+e.message)}};
+
+  useEffect(()=>{
+    if(timerRef.current)clearInterval(timerRef.current);
+    if(!running)return;
+    timerRef.current=setInterval(()=>{
+      setLog(p=>[...p.slice(-60),{t:new Date().toLocaleTimeString(),sp:spRef.current,np:npRef.current,diff:spRef.current-npRef.current,cad:cadRef.current}]);
+    },2000);
+    return()=>clearInterval(timerRef.current);
+  },[running]);
+
+  const avgDiff=log.length?Math.round(avg(log.map(d=>d.diff))):0;
+  const avgSP=log.length?Math.round(avg(log.map(d=>d.sp).filter(v=>v>0))):0;
+  const avgNP=log.length?Math.round(avg(log.map(d=>d.np).filter(v=>v>0))):0;
+
+  return(
+    <div style={{maxWidth:480,margin:"0 auto",padding:"20px 16px"}}>
+      <Header title="Power Diag" onBack={onBack}/>
+      <div style={{fontSize:12,color:"#64748b",marginBottom:16}}>Connect both devices and pedal. Compare power readings side by side.</div>
+      <Card>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+          <span style={{fontSize:14,fontWeight:600}}>Stages</span>
+          <button onClick={connectStages} disabled={!!stagesDev} style={{padding:"6px 16px",borderRadius:6,border:"1px solid #f59e0b40",background:stagesDev?"#f59e0b22":"transparent",color:stagesDev?"#f59e0b":"#64748b",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>{stagesDev||"Connect"}</button>
+        </div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <span style={{fontSize:14,fontWeight:600}}>Nero</span>
+          <button onClick={connectNero} disabled={!!neroDev} style={{padding:"6px 16px",borderRadius:6,border:"1px solid #8b5cf640",background:neroDev?"#8b5cf622":"transparent",color:neroDev?"#8b5cf6":"#64748b",fontSize:12,fontWeight:600,cursor:"pointer",fontFamily:"inherit"}}>{neroDev||"Connect"}</button>
+        </div>
+      </Card>
+      <div style={{display:"flex",gap:12,marginBottom:12}}>
+        <Card style={{flex:1,textAlign:"center"}}><Label>STAGES</Label><div style={{fontSize:48,fontWeight:900,color:"#f59e0b",fontFamily:MONO}}>{stagesP}</div><div style={{fontSize:11,color:"#64748b"}}>watts</div>{avgSP>0&&<div style={{fontSize:13,color:"#94a3b8",marginTop:4}}>avg {avgSP}W</div>}</Card>
+        <Card style={{flex:1,textAlign:"center"}}><Label>CADENCE</Label><div style={{fontSize:48,fontWeight:900,color:"#e2e8f0",fontFamily:MONO}}>{stagesCad}</div><div style={{fontSize:11,color:"#64748b"}}>rpm</div></Card>
+        <Card style={{flex:1,textAlign:"center"}}><Label>NERO</Label><div style={{fontSize:48,fontWeight:900,color:"#8b5cf6",fontFamily:MONO}}>{neroP}</div><div style={{fontSize:11,color:"#64748b"}}>watts</div>{avgNP>0&&<div style={{fontSize:13,color:"#94a3b8",marginTop:4}}>avg {avgNP}W</div>}</Card>
+      </div>
+      <Card style={{textAlign:"center"}}>
+        <Label>DIFFERENCE (STAGES − NERO)</Label>
+        <div style={{fontSize:36,fontWeight:900,color:Math.abs(stagesP-neroP)<10?"#22c55e":"#ef4444",fontFamily:MONO}}>{stagesP-neroP>0?"+":""}{stagesP-neroP}W</div>
+        {log.length>5&&<div style={{fontSize:13,color:"#94a3b8",marginTop:4}}>avg diff: {avgDiff>0?"+":""}{avgDiff}W</div>}
+      </Card>
+      <button onClick={()=>setRunning(!running)} style={{width:"100%",padding:"14px 0",borderRadius:10,border:"none",background:running?"#ef4444":"#f59e0b",color:"#0a0e17",fontSize:16,fontWeight:800,cursor:"pointer",fontFamily:"inherit",marginBottom:12}}>
+        {running?"■ STOP RECORDING":"● START RECORDING"}
+      </button>
+      {log.length>0&&<Card style={{maxHeight:200,overflowY:"auto"}}>
+        <Label>LOG</Label>
+        {log.slice(-20).reverse().map((d,i)=>(
+          <div key={i} style={{display:"flex",justifyContent:"space-between",fontSize:12,color:"#94a3b8",marginBottom:4,fontFamily:MONO}}>
+            <span style={{color:"#475569"}}>{d.t}</span><span style={{color:"#f59e0b"}}>{d.sp}W</span><span style={{color:"#e2e8f0"}}>{d.cad}rpm</span><span style={{color:"#8b5cf6"}}>{d.np}W</span><span style={{color:Math.abs(d.diff)<10?"#22c55e":"#ef4444"}}>{d.diff>0?"+":""}{d.diff}</span>
+          </div>
+        ))}
+      </Card>}
+      {log.length>0&&<button onClick={()=>{
+        const csv="Time,Stages_W,Nero_W,Diff_W,Cadence_RPM\n"+log.map(d=>`${d.t},${d.sp},${d.np},${d.diff},${d.cad||0}`).join("\n");
+        const blob=new Blob([csv],{type:"text/csv"});const url=URL.createObjectURL(blob);
+        const a=document.createElement("a");a.href=url;a.download=`z2ctrl-diag-${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(url);
+      }} style={{width:"100%",padding:"12px 0",borderRadius:8,border:"1px solid #334155",background:"none",color:"#94a3b8",fontSize:13,cursor:"pointer",fontFamily:"inherit",marginTop:8}}>📥 Download CSV ({log.length} rows)</button>}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// RAMP TEST PAGE
+// ═══════════════════════════════════════════════════════════════════════
+const RAMP_CUES=[
+  "Step up. Increase your effort now.",
+  "New target. Raise your power.",
+  "Next level. Push a little harder.",
+  "Step up. Find the new rhythm.",
+  "Increase. Hold this pace for one minute.",
+];
+const RIDE_TYPES=["Indoor Rollers","Indoor Spin","Outdoor"];
+
+function RampTestPage({cfg,hr,power,neroPwr,cadence,onSaveFtp,onBack}){
+  const[phase,setPhase]=useState("setup"); // setup | warmup | ramp | done
+  const[rideType,setRideType]=useState("Indoor Rollers");
+  const[stepSec,setStepSec]=useState(0);
+  const[stepNum,setStepNum]=useState(0);
+  const[totalSec,setTotalSec]=useState(0);
+  const[stepLog,setStepLog]=useState([]); // [{step,targetW,avgStages,avgNero,avgHR,avgCad}]
+  const[curStagesArr,setCurStagesArr]=useState([]);
+  const[curNeroArr,setCurNeroArr]=useState([]);
+  const[curHRArr,setCurHRArr]=useState([]);
+  const[curCadArr,setCurCadArr]=useState([]);
+  const[ftpResult,setFtpResult]=useState(null);
+
+  const timerRef=useRef(null);
+  const stepW=20;
+  const baseW=Math.round(cfg.ftp*0.5);
+  const targetW=baseW+stepNum*stepW;
+  const warmupSec=300; // 5 min warmup
+
+  // Timer
+  useEffect(()=>{
+    if(timerRef.current)clearInterval(timerRef.current);
+    if(phase!=="warmup"&&phase!=="ramp")return;
+    timerRef.current=setInterval(()=>{
+      setTotalSec(t=>t+1);
+      setStepSec(s=>{
+        const next=s+1;
+        // Collect data
+        if(power>0)setCurStagesArr(a=>[...a,power]);
+        if(neroPwr>0)setCurNeroArr(a=>[...a,neroPwr]);
+        if(hr>0)setCurHRArr(a=>[...a,hr]);
+        if(cadence>0)setCurCadArr(a=>[...a,cadence]);
+
+        if(phase==="warmup"&&next>=warmupSec){
+          // Warmup done, start ramp
+          setPhase("ramp");setStepNum(0);
+          setCurStagesArr([]);setCurNeroArr([]);setCurHRArr([]);setCurCadArr([]);
+          speak(RAMP_CUES[0],0.9);
+          return 0;
+        }
+        if(phase==="ramp"&&next>=60){
+          // Step complete — log it and advance
+          const sl={step:stepNum+1,targetW:baseW+stepNum*stepW,
+            avgStages:curStagesArr.length?Math.round(avg(curStagesArr)):0,
+            avgNero:curNeroArr.length?Math.round(avg(curNeroArr)):0,
+            avgHR:curHRArr.length?Math.round(avg(curHRArr)):0,
+            avgCad:curCadArr.length?Math.round(avg(curCadArr)):0};
+          setStepLog(l=>[...l,sl]);
+          setStepNum(n=>n+1);
+          setCurStagesArr([]);setCurNeroArr([]);setCurHRArr([]);setCurCadArr([]);
+          const nextTarget=baseW+(stepNum+1)*stepW;
+          speak(`Step up. Target ${nextTarget} watts.`,0.9);
+          return 0;
+        }
+        return next;
+      });
+    },1000);
+    return()=>clearInterval(timerRef.current);
+  },[phase,power,neroPwr,hr,cadence,stepNum,baseW]);
+
+  const stopTest=()=>{
+    clearInterval(timerRef.current);
+    // Log the partial current step
+    if(curStagesArr.length>10){
+      const sl={step:stepNum+1,targetW,
+        avgStages:Math.round(avg(curStagesArr)),avgNero:curNeroArr.length?Math.round(avg(curNeroArr)):0,
+        avgHR:curHRArr.length?Math.round(avg(curHRArr)):0,avgCad:curCadArr.length?Math.round(avg(curCadArr)):0,
+        partial:true};
+      setStepLog(l=>[...l,sl]);
+    }
+    // FTP = 75% of last full step's avg Stages power
+    const fullSteps=stepLog.filter(s=>!s.partial);
+    const lastFull=fullSteps.length>0?fullSteps[fullSteps.length-1]:null;
+    if(lastFull){
+      const ftp=Math.round(lastFull.avgStages*0.75);
+      setFtpResult({ftp,lastStep:lastFull.step,lastStepPower:lastFull.avgStages,
+        peakHR:Math.max(...stepLog.map(s=>s.avgHR).filter(h=>h>0),0)});
+    }
+    setPhase("done");
+    speak("Test complete. Well done.",0.9);
+  };
+
+  // ── Setup screen ──
+  if(phase==="setup")return(
+    <div style={{maxWidth:480,margin:"0 auto",padding:"20px 16px"}}>
+      <Header title="Ramp Test" onBack={onBack}/>
+      <Card><Label>RIDE TYPE</Label>
+        <div style={{display:"flex",gap:6}}>
+          {RIDE_TYPES.map(t=><button key={t} onClick={()=>setRideType(t)} style={{flex:1,padding:"12px 4px",borderRadius:8,border:rideType===t?"1px solid #f59e0b40":"1px solid #1e293b",background:rideType===t?"#22c55e12":"#161a23",color:rideType===t?"#22c55e":"#64748b",fontSize:12,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>{t}</button>)}
+        </div>
+      </Card>
+      <Card><Label>PROTOCOL</Label>
+        <div style={{fontSize:13,color:"#94a3b8",lineHeight:1.6}}>
+          5-minute warmup at easy pace, then 1-minute steps increasing {stepW}W each.
+          Starting at {baseW}W (50% of FTP {cfg.ftp}W).
+          Ride until you can't hold the target. FTP = 75% of last completed step.
+        </div>
+        <div style={{fontSize:12,color:"#f59e0b",marginTop:8}}>Match the target power by shifting gears and pedalling harder</div>
+      </Card>
+      <button onClick={()=>{setPhase("warmup");setTotalSec(0);setStepSec(0);speak("Warmup. Five minutes easy.",0.9)}} style={{width:"100%",padding:"18px 0",borderRadius:12,border:"none",background:"#ef4444",color:"#fff",fontSize:20,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}}>START RAMP TEST</button>
+    </div>
+  );
+
+  // ── Active test (warmup + ramp) ──
+  if(phase==="warmup"||phase==="ramp"){
+    const isWarmup=phase==="warmup";
+    const pctStep=isWarmup?stepSec/warmupSec:stepSec/60;
+    const dispTarget=isWarmup?"WARMUP":`${targetW}W`;
+    const stepLabel=isWarmup?`Warmup ${fmt(warmupSec-stepSec)}`:`Step ${stepNum+1} — ${60-stepSec}s`;
+    const pctFTP=cfg.ftp>0?Math.round(power/cfg.ftp*100):0;
+    // Target colour: green if within 10%, amber if under, red if way under
+    const tgtColor=isWarmup?"#22c55e":power>=targetW*0.9?"#22c55e":power>=targetW*0.7?"#f59e0b":"#ef4444";
+    return(
+      <div style={{height:"100vh",width:"100vw",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"space-between",background:"#111318",padding:"20px 16px"}}>
+        <div style={{width:"100%",textAlign:"center"}}>
+          <div style={{fontSize:12,color:isWarmup?"#22c55e":tgtColor,fontWeight:700,letterSpacing:"2px",fontFamily:MONO}}>{stepLabel}</div>
+          <div style={{width:"100%",height:6,background:"#1e293b",borderRadius:3,marginTop:8,overflow:"hidden"}}>
+            <div style={{height:"100%",width:`${pctStep*100}%`,background:tgtColor,borderRadius:3,transition:"width 0.5s"}}/>
+          </div>
+        </div>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:16,color:"#64748b",letterSpacing:"3px",fontWeight:600}}>TARGET</div>
+          <div style={{fontSize:72,fontWeight:900,color:tgtColor,fontFamily:MONO,lineHeight:1}}>{dispTarget}</div>
+        </div>
+        <div style={{display:"flex",gap:30,alignItems:"flex-start"}}>
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:52,fontWeight:900,color:"#f59e0b",fontFamily:MONO,lineHeight:1}}>{power}</div>
+            <div style={{fontSize:10,color:"#64748b",letterSpacing:"2px",marginTop:4}}>STAGES</div>
+          </div>
+          <div style={{width:1,height:50,background:"#252a35",alignSelf:"center"}}/>
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:36,fontWeight:800,color:"#8b5cf6",fontFamily:MONO,lineHeight:1}}>{neroPwr}</div>
+            <div style={{fontSize:10,color:"#64748b",letterSpacing:"2px",marginTop:4}}>NERO</div>
+          </div>
+          <div style={{width:1,height:50,background:"#252a35",alignSelf:"center"}}/>
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:36,fontWeight:800,color:"#ef4444",fontFamily:MONO,lineHeight:1}}>{hr||"—"}</div>
+            <div style={{fontSize:10,color:"#64748b",letterSpacing:"2px",marginTop:4}}>BPM</div>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+          <div style={{textAlign:"center"}}><div style={{fontSize:24,fontWeight:700,color:"#e2e8f0",fontFamily:MONO}}>{cadence}</div><div style={{fontSize:9,color:"#64748b"}}>RPM</div></div>
+          <div style={{textAlign:"center"}}><div style={{fontSize:24,fontWeight:700,color:"#e2e8f0",fontFamily:MONO}}>{pctFTP}%</div><div style={{fontSize:9,color:"#64748b"}}>FTP</div></div>
+          <div style={{textAlign:"center"}}><div style={{fontSize:24,fontWeight:700,color:"#e2e8f0",fontFamily:MONO}}>{fmt(totalSec)}</div><div style={{fontSize:9,color:"#64748b"}}>TOTAL</div></div>
+        </div>
+        {stepLog.length>0&&<div style={{width:"100%",display:"flex",gap:2,justifyContent:"center"}}>
+          {stepLog.map((s,i)=><div key={i} style={{width:24,height:24,borderRadius:4,background:s.avgStages>=s.targetW*0.9?"#22c55e":"#f59e0b",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:700,color:"#0a0e17",fontFamily:MONO}}>{s.step}</div>)}
+        </div>}
+        <button onClick={stopTest} style={{width:"100%",padding:"18px 0",borderRadius:12,border:"none",background:"#ef4444",color:"#fff",fontSize:20,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}}>I'M DONE</button>
+      </div>
+    );
+  }
+
+  // ── Results ──
+  if(phase==="done")return(
+    <div style={{maxWidth:480,margin:"0 auto",padding:"20px 16px"}}>
+      <div style={{fontSize:24,fontWeight:800,color:"#ef4444",fontFamily:MONO,marginBottom:4}}>Ramp Test Complete</div>
+      <div style={{display:"flex",gap:16,fontSize:13,color:"#64748b",marginBottom:16,fontFamily:MONO}}>
+        <span>{rideType}</span><span>{fmt(totalSec)}</span>
+      </div>
+      {ftpResult&&<Card>
+        <Label>ESTIMATED FTP</Label>
+        <div style={{display:"flex",justifyContent:"space-around",alignItems:"center",gap:12}}>
+          <div style={{textAlign:"center"}}><div style={{fontSize:48,fontWeight:900,color:"#f59e0b",fontFamily:MONO}}>{ftpResult.ftp}</div><div style={{fontSize:10,color:"#64748b"}}>WATTS</div></div>
+          <div style={{textAlign:"center"}}><div style={{fontSize:24,fontWeight:800,color:"#94a3b8",fontFamily:MONO}}>{ftpResult.lastStep}</div><div style={{fontSize:10,color:"#64748b"}}>LAST STEP</div></div>
+          <div style={{textAlign:"center"}}><div style={{fontSize:24,fontWeight:800,color:"#ef4444",fontFamily:MONO}}>{ftpResult.peakHR}</div><div style={{fontSize:10,color:"#64748b"}}>PEAK HR</div></div>
+        </div>
+        {cfg.ftp!==ftpResult.ftp&&<div style={{marginTop:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:13,color:"#94a3b8"}}>Previous FTP: {cfg.ftp}W ({ftpResult.ftp>cfg.ftp?"+":""}{ftpResult.ftp-cfg.ftp}W)</span>
+          <button onClick={()=>onSaveFtp(ftpResult.ftp)} style={{padding:"8px 16px",borderRadius:6,border:"none",background:"#22c55e",color:"#0a0e17",fontSize:13,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>Save as FTP</button>
+        </div>}
+      </Card>}
+      <Card><Label>STEP LOG</Label>
+        <div style={{display:"flex",gap:8,marginBottom:8,fontSize:10,color:"#475569",fontFamily:MONO}}>
+          <span style={{width:30}}>STEP</span><span style={{flex:1}}>TARGET</span><span style={{flex:1}}>STAGES</span><span style={{flex:1}}>NERO</span><span style={{flex:1}}>HR</span><span style={{flex:1}}>RPM</span>
+        </div>
+        {stepLog.map((s,i)=>(
+          <div key={i} style={{display:"flex",gap:8,fontSize:13,color:s.partial?"#475569":"#94a3b8",fontFamily:MONO,marginBottom:4}}>
+            <span style={{width:30,fontWeight:700}}>{s.step}{s.partial?"*":""}</span>
+            <span style={{flex:1}}>{s.targetW}W</span>
+            <span style={{flex:1,color:"#f59e0b"}}>{s.avgStages}W</span>
+            <span style={{flex:1,color:"#8b5cf6"}}>{s.avgNero||"—"}</span>
+            <span style={{flex:1,color:"#ef4444"}}>{s.avgHR||"—"}</span>
+            <span style={{flex:1}}>{s.avgCad||"—"}</span>
+          </div>
+        ))}
+        {stepLog.some(s=>s.partial)&&<div style={{fontSize:10,color:"#475569",marginTop:4}}>* partial step (stopped mid-minute)</div>}
+      </Card>
+      <button onClick={onBack} style={{width:"100%",padding:"14px 0",borderRadius:10,border:"1px solid #1e293b",background:"none",color:"#64748b",fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>← Back to Setup</button>
+    </div>
+  );
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SUMMARY PAGE
+// ═══════════════════════════════════════════════════════════════════════
+function SummaryPage({ride,history,setHistory,cfg,onBack}){
+  const{elapsed,activeTime,pwrLog,hrLog,cadLog,zoneHist,neroPwrLog,neroDistance,neroSpeed}=ride;
+  const aP=pwrLog.filter(p=>p>0),aH=hrLog.filter(h=>h>0),aC=cadLog.filter(c=>c>0);
+  const avgP=aP.length?Math.round(avg(aP)):0,maxP=aP.length?Math.max(...aP):0;
+  const avgH=aH.length?Math.round(avg(aH)):0,maxH=aH.length?Math.max(...aH):0;
+  const avgC=aC.length?Math.round(avg(aC)):0;
+  const zS=[0,0,0,0,0,0];zoneHist.forEach(z=>{if(z>=0&&z<=5)zS[z]+=60});
+  const tz=zS.reduce((a,b)=>a+b,0)||1;
+
+  // 20-min rolling avg
+  const win20=Math.min(pwrLog.length,1200);
+  const last20=pwrLog.slice(-win20).filter(p=>p>0);
+  const avg20=last20.length>=60?Math.round(avg(last20)):null;
+
+  // Nero offset
+  const nP=neroPwrLog||[];const pairs=[];
+  for(let i=0;i<Math.min(pwrLog.length,nP.length);i++){if(pwrLog[i]>0&&nP[i]>0)pairs.push(pwrLog[i]-nP[i])}
+  const avgOffset=pairs.length>=30?Math.round(avg(pairs)):null;
+  const hasNero=pairs.length>=30;
+  const aN=nP.filter(p=>p>0);
+  const avgNP=aN.length?Math.round(avg(aN)):0,maxNP=aN.length?Math.max(...aN):0;
+
+  // EF (Z2 samples only — where HR is within Z2 range)
+  const z2zones=useMemo(()=>mkZones(cfg.maxHR,cfg.restHR),[cfg.maxHR,cfg.restHR]);
+  const z2s=z2zones.find(z=>z.zone===2);
+  const z2Pairs=[];
+  for(let i=0;i<Math.min(pwrLog.length,hrLog.length);i++){if(z2s&&hrLog[i]>=z2s.lo&&hrLog[i]<=z2s.hi&&pwrLog[i]>0)z2Pairs.push({p:pwrLog[i],h:hrLog[i]})}
+  const ef=z2Pairs.length>=60?parseFloat((avg(z2Pairs.map(e=>e.p))/avg(z2Pairs.map(e=>e.h))).toFixed(2)):0;
+  const efStr=ef>0?ef.toFixed(2):"—";
+
+  // Distance & speed from Nero
+  const distKm=neroDistance?parseFloat(neroDistance.toFixed(2)):0;
+  const avgSpd=distKm>0&&activeTime>0?parseFloat((distKm/(activeTime/3600)).toFixed(1)):neroSpeed>0?parseFloat(neroSpeed.toFixed(1)):null;
+
+  // Sweat tracking
+  const[wtBefore,setWtBefore]=useState("");
+  const[wtAfter,setWtAfter]=useState("");
+  const sweatLoss=wtBefore&&wtAfter?parseFloat((parseFloat(wtBefore)-parseFloat(wtAfter)).toFixed(2)):null;
+  const sweatMl=sweatLoss!==null&&sweatLoss>0?Math.round(sweatLoss*1000):null;
+  const sweatRate=sweatMl&&activeTime>0?parseFloat((sweatMl/(activeTime/3600)).toFixed(0)):null;
+
+  const[rpe,setRpe]=useState(5);
+  const[saved,setSaved]=useState(false);
+  const[copied,setCopied]=useState(false);
+
+  const doSave=(rpeVal)=>{
+    const r={date:new Date().toISOString(),duration:elapsed,activeTime,avgHR:avgH,maxHR:maxH,
+      avgPower:avgP,maxPower:maxP,avgCadence:avgC,pctFTP:cfg.ftp>0&&aP.length?Math.round(avg(aP)/cfg.ftp*100):0,
+      avgNeroPower:avgNP,maxNeroPower:maxNP,powerOffset:avgOffset,avg20min:avg20,
+      ef:ef>0?parseFloat(ef.toFixed(2)):null,distance:distKm||null,avgSpeed:avgSpd,
+      sweatLossKg:sweatLoss>0?sweatLoss:null,sweatRateMlHr:sweatRate,
+      zones:zoneHist,zoneSecs:zS,rpe:rpeVal,controlMode:cfg.controlMode,rideDuration:cfg.rideDuration};
+    const h=[r,...history].slice(0,50);
+    setHistory(h);ls.set(SK.hist,h);ls.set(SK.cf,r);
+    setSaved(true);return r;
+  };
+  const doCopy=()=>{try{
+    const r=ls.get(SK.cf,{});
+    const d=new Date(r.date);const ds=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+    const line=`Z2|${ds}|${fmt(r.activeTime||0)}|avgW:${r.avgPower||0}|avgHR:${r.avgHR||0}|cad:${r.avgCadence||0}|ef:${r.ef||""}|dist:${r.distance||""}|spd:${r.avgSpeed||""}|rpe:${r.rpe||""}|20min:${r.avg20min||""}|neroW:${r.avgNeroPower||""}|offset:${r.powerOffset||""}|sweat:${r.sweatLossKg||""}|sweatRate:${r.sweatRateMlHr||""}`;
+    navigator.clipboard.writeText(line);setCopied(true);
+  }catch{}};
+
+  return(
+    <div style={{maxWidth:480,margin:"0 auto",padding:"20px 16px"}}>
+      <div style={{fontSize:24,fontWeight:800,color:"#f59e0b",fontFamily:MONO,marginBottom:4}}>Ride Complete</div>
+      <div style={{display:"flex",gap:16,fontSize:13,color:"#64748b",marginBottom:20,fontFamily:MONO}}>
+        <span>Total {fmt(elapsed)}</span><span>Active {fmt(activeTime)}</span>
+      </div>
+      <Card>
+        <Label>STAGES</Label>
+        <div style={{display:"flex",justifyContent:"space-around",flexWrap:"wrap",gap:12}}>
+          {[{v:avgP,l:"AVG W",c:"#f59e0b"},{v:maxP,l:"MAX W",c:"#f59e0b"},{v:avgH,l:"AVG HR",c:"#ef4444"},{v:maxH,l:"MAX HR",c:"#ef4444"},{v:avgC,l:"AVG RPM",c:"#e2e8f0"},{v:cfg.ftp>0?Math.round(avgP/cfg.ftp*100):0,l:"% FTP",c:"#94a3b8"}].map((s,i)=>
+            <div key={i} style={{textAlign:"center",minWidth:60}}><div style={{fontSize:28,fontWeight:800,color:s.c,fontFamily:MONO}}>{s.v}</div><div style={{fontSize:10,color:"#64748b"}}>{s.l}</div></div>
+          )}
+        </div>
+        {avgNP>0&&<><div style={{borderTop:"1px solid #1e293b",margin:"12px 0 8px"}}/>
+          <div style={{display:"flex",justifyContent:"space-around",gap:12}}>
+            <div style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:800,color:"#8b5cf6",fontFamily:MONO}}>{avgNP}</div><div style={{fontSize:9,color:"#64748b"}}>NERO AVG</div></div>
+            <div style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:800,color:"#8b5cf6",fontFamily:MONO}}>{maxNP}</div><div style={{fontSize:9,color:"#64748b"}}>NERO MAX</div></div>
+            {avgOffset!==null&&<div style={{textAlign:"center"}}><div style={{fontSize:18,fontWeight:800,color:avgOffset>0?"#f59e0b":"#8b5cf6",fontFamily:MONO}}>{avgOffset>0?"+":""}{avgOffset}</div><div style={{fontSize:9,color:"#64748b"}}>OFFSET</div></div>}
+          </div>
+        </>}
+      </Card>
+      <Card>
+        <div style={{display:"flex",justifyContent:"space-around",alignItems:"center",gap:12}}>
+          <div style={{textAlign:"center"}}><div style={{fontSize:28,fontWeight:800,color:"#22c55e",fontFamily:MONO}}>{efStr}</div><div style={{fontSize:9,color:"#64748b"}}>EF</div></div>
+          {distKm>0&&<div style={{textAlign:"center"}}><div style={{fontSize:28,fontWeight:800,color:"#e2e8f0",fontFamily:MONO}}>{distKm.toFixed(1)}</div><div style={{fontSize:9,color:"#64748b"}}>km</div></div>}
+          {avgSpd&&<div style={{textAlign:"center"}}><div style={{fontSize:28,fontWeight:800,color:"#e2e8f0",fontFamily:MONO}}>{avgSpd}</div><div style={{fontSize:9,color:"#64748b"}}>km/h</div></div>}
+        </div>
+      </Card>
+      <Card><Label>SWEAT LOSS</Label>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{textAlign:"center",flex:1}}>
+            <input type="number" step="0.1" value={wtBefore} onChange={e=>setWtBefore(e.target.value)} placeholder="Before" style={{width:"100%",padding:"8px 6px",borderRadius:6,border:"1px solid #334155",background:"#0a0e17",color:"#e2e8f0",fontSize:18,fontWeight:700,fontFamily:MONO,textAlign:"center"}}/>
+            <div style={{fontSize:9,color:"#64748b",marginTop:4}}>BEFORE kg</div>
+          </div>
+          <span style={{color:"#334155",fontSize:20}}>→</span>
+          <div style={{textAlign:"center",flex:1}}>
+            <input type="number" step="0.1" value={wtAfter} onChange={e=>setWtAfter(e.target.value)} placeholder="After" style={{width:"100%",padding:"8px 6px",borderRadius:6,border:"1px solid #334155",background:"#0a0e17",color:"#e2e8f0",fontSize:18,fontWeight:700,fontFamily:MONO,textAlign:"center"}}/>
+            <div style={{fontSize:9,color:"#64748b",marginTop:4}}>AFTER kg</div>
+          </div>
+          {sweatLoss!==null&&sweatLoss>0&&<div style={{textAlign:"center",flex:1}}>
+            <div style={{fontSize:22,fontWeight:800,color:"#3b82f6",fontFamily:MONO}}>{sweatMl}ml</div>
+            <div style={{fontSize:9,color:"#64748b"}}>{sweatRate}ml/hr</div>
+          </div>}
+        </div>
+      </Card>
+      {avg20!==null&&<Card>
+        <Label>20-MIN AVERAGE</Label>
+        <div style={{display:"flex",justifyContent:"space-around",gap:12}}>
+          <div style={{textAlign:"center"}}><div style={{fontSize:28,fontWeight:800,color:"#f59e0b",fontFamily:MONO}}>{avg20}W</div><div style={{fontSize:9,color:"#64748b"}}>STAGES</div></div>
+          {hasNero&&avgOffset!==null&&<div style={{textAlign:"center"}}><div style={{fontSize:28,fontWeight:800,color:"#8b5cf6",fontFamily:MONO}}>{avg20-avgOffset}W</div><div style={{fontSize:9,color:"#64748b"}}>NERO-ADJ</div></div>}
+        </div>
+      </Card>}
+      <Card><Label>TIME IN ZONES</Label>
+        {[1,2,3,4,5].map(z=>{const pct=Math.round(zS[z]/tz*100);return(
+          <div key={z} style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+            <span style={{fontSize:13,color:"#94a3b8",width:24,fontFamily:MONO}}>Z{z}</span>
+            <div style={{flex:1,height:16,background:"#1e293b",borderRadius:5,overflow:"hidden"}}><div style={{width:`${pct}%`,height:"100%",background:ZC[z],borderRadius:5}}/></div>
+            <span style={{fontSize:13,color:"#64748b",width:36,textAlign:"right",fontFamily:MONO}}>{pct}%</span>
+            <span style={{fontSize:12,color:"#475569",width:48,textAlign:"right",fontFamily:MONO}}>{fmt(zS[z])}</span>
+          </div>
+        )})}
+      </Card>
+      <Card><Label>HOW DID IT FEEL? (RPE)</Label>
+        <div style={{display:"flex",gap:4,justifyContent:"center"}}>
+          {[1,2,3,4,5,6,7,8,9,10].map(v=><button key={v} onClick={()=>setRpe(v)} style={{width:32,height:36,borderRadius:6,border:"none",background:rpe===v?(v<=3?"#22c55e":v<=6?"#f59e0b":"#ef4444"):"#1e293b",color:rpe===v?"#0a0e17":"#64748b",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>{v}</button>)}
+        </div>
+      </Card>
+      {zoneHist.length>0&&<div style={{display:"flex",justifyContent:"center",marginBottom:16}}>
+        <svg width={150} height={150}>
+          <circle cx={75} cy={75} r={58} fill="none" stroke="#1e293b" strokeWidth={10}/>
+          {zoneHist.map((z,i)=>{const sa=360/Math.max(zoneHist.length,cfg.rideDuration),s=-90+i*sa,e=s+sa-0.4;
+            const sr=s*Math.PI/180,er=e*Math.PI/180;
+            return<path key={i} d={`M${75+58*Math.cos(sr)} ${75+58*Math.sin(sr)}A58 58 0 0 1 ${75+58*Math.cos(er)} ${75+58*Math.sin(er)}`} fill="none" stroke={ZC[z]} strokeWidth={10} strokeLinecap="round"/>;
+          })}
+        </svg>
+      </div>}
+      <div style={{display:"flex",gap:8}}>
+        {!saved?<button onClick={()=>doSave(rpe)} style={{flex:1,padding:"14px 0",borderRadius:10,border:"none",background:"#f59e0b",color:"#0a0e17",fontSize:16,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}}>SAVE RIDE</button>
+        :<button disabled style={{flex:1,padding:"14px 0",borderRadius:10,border:"none",background:"#1e293b",color:"#f59e0b",fontSize:16,fontWeight:800,fontFamily:"inherit"}}>✓ SAVED</button>}
+        <button onClick={()=>{if(!saved)doSave(rpe);setTimeout(doCopy,100)}} style={{flex:1,padding:"14px 0",borderRadius:10,border:"1px solid #334155",background:copied?"#3b82f620":"transparent",color:copied?"#3b82f6":"#94a3b8",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>{copied?"✓ Copied":"📋 ClaudeFit"}</button>
+      </div>
+      <button onClick={onBack} style={{width:"100%",marginTop:10,padding:"12px 0",borderRadius:8,border:"1px solid #1e293b",background:"none",color:"#64748b",fontSize:14,cursor:"pointer",fontFamily:"inherit"}}>← Back to Setup</button>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// RIDE PAGE
+// ═══════════════════════════════════════════════════════════════════════
+function RidePage({cfg,zones,hr,power,cadence,neroPwr,pwrLog,neroPwrLog,hrLog,riding,paused,setPaused,elapsed,activeTime,zoneHist,resist,sendR,autoCtrl,simMode,onStop,showCue,cueText,cueVisible}){
+  const cz=getZone(hr,zones);const z2=zones.find(z=>z.zone===2);
+  const pctFTP=cfg.ftp>0?Math.round(power/cfg.ftp*100):0;
+  // 20-min rolling avg (last 1200s of Stages power)
+  const win20=Math.min(pwrLog.length,1200);
+  const last20=pwrLog.slice(-win20).filter(p=>p>0);
+  const avg20=last20.length>=60?Math.round(avg(last20)):null;
+  // Live offset
+  const nP=neroPwrLog||[];const pairs=[];
+  for(let i=Math.max(0,pwrLog.length-600);i<Math.min(pwrLog.length,nP.length);i++){if(pwrLog[i]>0&&nP[i]>0)pairs.push(pwrLog[i]-nP[i])}
+  const liveOffset=pairs.length>=10?Math.round(avg(pairs)):null;
+
+  // 2-min rolling EF (Z2 samples only)
+  const hL=hrLog||[],pL=pwrLog||[];
+  const efWin=Math.min(pL.length,120);
+  const efPairs=[];
+  for(let i=pL.length-efWin;i<pL.length;i++){if(z2&&hL[i]>=z2.lo&&hL[i]<=z2.hi&&pL[i]>0)efPairs.push({p:pL[i],h:hL[i]})}
+  const liveEF=efPairs.length>=20?parseFloat((avg(efPairs.map(e=>e.p))/avg(efPairs.map(e=>e.h))).toFixed(2)):null;
+
+  // Background colour shift based on HR position
+  // Sweet spot: 132-136. Lightens toward white as HR drifts toward zone boundaries
+  let bgColor="#111318"; // default dark
+  if(z2&&hr>0){
+    const sweet={lo:132,hi:136};
+    if(hr>=sweet.lo&&hr<=sweet.hi){bgColor="#111318"} // sweet spot = full dark
+    else if(hr>sweet.hi&&hr<=z2.hi){
+      // Above sweet spot toward Z3: gradually lighten
+      const pct=Math.min(1,(hr-sweet.hi)/(z2.hi-sweet.hi));
+      const v=Math.round(17+pct*220); // 17 (dark) → 237 (near white)
+      bgColor=`rgb(${v},${v},${v})`;
+    }else if(hr<sweet.lo&&hr>=z2.lo){
+      // Below sweet spot toward Z1: gradually lighten
+      const pct=Math.min(1,(sweet.lo-hr)/(sweet.lo-z2.lo));
+      const v=Math.round(17+pct*220);
+      bgColor=`rgb(${v},${v},${v})`;
+    }else if(hr>z2.hi){bgColor="#ededed"} // above Z2 = near white
+    else if(hr<z2.lo&&hr>0){bgColor="#ededed"} // below Z2 = near white
+  }
+  // Text shadow for readability on light backgrounds
+  const isLight=hr>0&&z2&&(hr>136||hr<132);
+  const ts=isLight?"0 0 4px rgba(0,0,0,0.8), 0 0 8px rgba(0,0,0,0.5)":"none";
+  const CS=Math.min(window.innerWidth*0.74,350);
+  const cx=CS/2,R=cx-16,SW=14;
+  const totalMin=cfg.rideDuration,segA=360/totalMin;
+  const fillPct=cz.zone===0?(hr>0?0.1:0):Math.max(0.05,Math.min(0.95,cz.pct));
+  const fC=cz.color;
+  const fillY=CS-(fillPct*CS*0.82)-CS*0.09;
+
+  return(
+    <div style={{height:"100vh",width:"100vw",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"space-between",position:"relative",background:bgColor,transition:"background 2s ease",padding:"12px 0 0 0"}}>
+      <div style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 16px",zIndex:10}}>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {simMode&&<span style={{fontSize:11,color:"#f59e0b",fontWeight:700,background:"#f59e0b18",padding:"3px 8px",borderRadius:4,fontFamily:MONO}}>SIM</span>}
+          {paused&&<span style={{fontSize:11,color:"#f59e0b",fontWeight:700,animation:"pulse 1.5s infinite"}}>PAUSED</span>}
+        </div>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+          <button onClick={()=>speak(TECH[0],cfg.voiceRate,cfg.voiceVolume)} style={{background:"none",border:"none",color:"#475569",fontSize:16,cursor:"pointer",padding:4}}>🔊</button>
+          <span style={{fontSize:10,letterSpacing:"1.5px",fontWeight:600,color:autoCtrl?(elapsed>=60?"#22c55e":"#f59e0b80"):"#334155",fontFamily:MONO}}>
+            {autoCtrl?(elapsed>=60?"AUTO":`AUTO ${fmt(Math.max(0,60-elapsed))}`):"MANUAL"}
+          </span>
+        </div>
+      </div>
+      {/* Resistance + both sides */}
+      <button onClick={()=>sendR(resist+5)} style={{position:"absolute",right:10,top:50,width:52,height:52,borderRadius:12,border:"2px solid #8b5cf640",background:"#1a1f2b",color:"#8b5cf6",fontSize:28,fontWeight:800,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",zIndex:10}}>+</button>
+      <button onClick={()=>sendR(resist+5)} style={{position:"absolute",left:10,top:50,width:52,height:52,borderRadius:12,border:"2px solid #8b5cf640",background:"#1a1f2b",color:"#8b5cf6",fontSize:28,fontWeight:800,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center",zIndex:10}}>+</button>
+      <div style={{position:"absolute",right:10,top:108,width:52,textAlign:"center",zIndex:10}}>
+        <div style={{fontSize:20,fontWeight:800,color:"#8b5cf6",fontFamily:MONO}}>{resist}</div>
+        <div style={{fontSize:7,color:"#475569",letterSpacing:"2px",fontWeight:600}}>RESIST</div>
+      </div>
+      <div style={{position:"relative",width:CS,height:CS,flexShrink:0}}>
+        <svg width={CS} height={CS} style={{position:"absolute",top:0,left:0}}>
+          <defs><clipPath id="cC"><circle cx={cx} cy={cx} r={R-SW/2-2}/></clipPath></defs>
+          <circle cx={cx} cy={cx} r={R} fill="none" stroke="#252a35" strokeWidth={SW}/>
+          {zoneHist.map((z,i)=>{
+            const s=-90+i*segA,e=s+segA-0.4;const sr=s*Math.PI/180,er=e*Math.PI/180;
+            return<path key={i} d={`M${cx+R*Math.cos(sr)} ${cx+R*Math.sin(sr)}A${R} ${R} 0 0 1 ${cx+R*Math.cos(er)} ${cx+R*Math.sin(er)}`} fill="none" stroke={ZC[z]||"#334155"} strokeWidth={SW} strokeLinecap="round"/>;
+          })}
+          {(()=>{const cm=zoneHist.length;if(cm>=totalMin)return null;const pct=(elapsed%60)/60,sw=segA*pct;if(sw<0.3)return null;const s=-90+cm*segA,e=s+sw;const sr=s*Math.PI/180,er=e*Math.PI/180;return<path d={`M${cx+R*Math.cos(sr)} ${cx+R*Math.sin(sr)}A${R} ${R} 0 0 1 ${cx+R*Math.cos(er)} ${cx+R*Math.sin(er)}`} fill="none" stroke={fC+"70"} strokeWidth={SW} strokeLinecap="round"/>;})()}
+          <g clipPath="url(#cC)"><rect x={0} y={fillY} width={CS} height={CS} fill={fC+"22"} style={{animation:"liqA 3s ease-in-out infinite"}}/><ellipse cx={cx} cy={fillY} rx={cx+10} ry={6} fill={fC+"40"} style={{animation:"liqB 2.5s ease-in-out infinite"}}/></g>
+        </svg>
+        <div style={{position:"absolute",top:0,left:0,width:"100%",height:"100%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",zIndex:2}}>
+          <div style={{fontSize:CS*0.26,fontWeight:900,color:"#fff",lineHeight:1,fontVariantNumeric:"tabular-nums",letterSpacing:"-2px",fontFamily:MONO,textShadow:ts}}>{fmt(elapsed)}</div>
+          <div style={{fontSize:15,fontWeight:800,color:"#fff",letterSpacing:"4px",marginTop:10,textTransform:"uppercase",opacity:0.9,textShadow:ts}}>{ZN[cz.zone]}</div>
+          <div style={{fontSize:14,color:"#ffffffaa",marginTop:3,fontWeight:600,fontFamily:MONO,textShadow:ts}}>{cz.zone>0?`${cz.lo}–${cz.hi} bpm`:""}</div>
+          <div style={{fontSize:CS*0.18,fontWeight:900,color:"#fff",marginTop:8,fontVariantNumeric:"tabular-nums",fontFamily:MONO,textShadow:ts}}>
+            {hr>0?hr:"—"}<span style={{fontSize:15,color:"#ffffff80",fontWeight:500,marginLeft:4}}>bpm</span>
+          </div>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:40,alignItems:"flex-start"}}>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:58,fontWeight:900,color:"#f59e0b",fontVariantNumeric:"tabular-nums",lineHeight:1,fontFamily:MONO}}>{power}</div>
+          <div style={{fontSize:11,color:"#64748b",letterSpacing:"2px",marginTop:4,fontWeight:700}}>WATTS</div>
+          <div style={{fontSize:20,color:"#ffffffcc",fontWeight:700,marginTop:4,fontFamily:MONO}}>{pctFTP}% <span style={{fontSize:12,color:"#ffffff60"}}>FTP</span></div>
+        </div>
+        <div style={{width:1,height:70,background:"#252a35",alignSelf:"center"}}/>
+        <div style={{textAlign:"center"}}>
+          <div style={{fontSize:58,fontWeight:900,color:"#fff",fontVariantNumeric:"tabular-nums",lineHeight:1,fontFamily:MONO,textShadow:ts}}>{cadence}</div>
+          <div style={{fontSize:11,color:"#64748b",letterSpacing:"2px",marginTop:4,fontWeight:700}}>RPM</div>
+        </div>
+      </div>
+      {(avg20!==null||liveOffset!==null||liveEF!==null)&&<div style={{display:"flex",gap:16,justifyContent:"center",alignItems:"center",padding:"0 16px"}}>
+        {liveEF!==null&&<div style={{textAlign:"center"}}>
+          <div style={{fontSize:24,fontWeight:800,color:"#22c55e",fontFamily:MONO,textShadow:ts}}>{liveEF}</div>
+          <div style={{fontSize:9,color:isLight?"#333":"#64748b",letterSpacing:"1px"}}>EF 2min</div>
+        </div>}
+        {avg20!==null&&<div style={{textAlign:"center"}}>
+          <div style={{fontSize:24,fontWeight:800,color:"#f59e0b",fontFamily:MONO}}>{avg20}W</div>
+          <div style={{fontSize:9,color:isLight?"#333":"#64748b",letterSpacing:"1px"}}>20min AVG</div>
+        </div>}
+        {liveOffset!==null&&<div style={{textAlign:"center"}}>
+          <div style={{fontSize:18,fontWeight:700,color:"#8b5cf6",fontFamily:MONO}}>{liveOffset>0?"+":""}{liveOffset}W</div>
+          <div style={{fontSize:9,color:isLight?"#333":"#64748b",letterSpacing:"1px"}}>S−N OFFSET</div>
+        </div>}
+      </div>}
+      <div style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 16px 20px 16px"}}>
+        <button onClick={()=>sendR(resist-5)} style={{width:52,height:52,borderRadius:14,border:"2px solid #8b5cf640",background:"#1a1f2b",color:"#8b5cf6",fontSize:28,fontWeight:800,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+        <button onClick={onStop} style={{width:44,height:44,borderRadius:10,border:"none",background:"#ef444430",color:"#ef4444",fontSize:18,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+        </button>
+        <button onClick={()=>setPaused(p=>!p)} style={{width:72,height:72,borderRadius:20,border:paused?"2px solid #22c55e":"2px solid #ffffff30",background:paused?"#22c55e20":"#ffffff10",color:paused?"#22c55e":"#fff",fontSize:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>
+          {paused?<svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><polygon points="6,3 20,12 6,21"/></svg>:<svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="3" width="5" height="18" rx="1"/><rect x="14" y="3" width="5" height="18" rx="1"/></svg>}
+        </button>
+        <div style={{width:44}}/>
+        <button onClick={()=>sendR(resist-5)} style={{width:52,height:52,borderRadius:14,border:"2px solid #8b5cf640",background:"#1a1f2b",color:"#8b5cf6",fontSize:28,fontWeight:800,cursor:"pointer",fontFamily:"inherit",display:"flex",alignItems:"center",justifyContent:"center"}}>−</button>
+      </div>
+      {cueText&&cueVisible&&<div className={`toast${cueVisible?"":" out"}`}>{cueText}</div>}
+      <div style={{position:"absolute",bottom:0,left:0,width:"100%",height:3}}>
+        <div style={{height:"100%",width:`${Math.min(1,elapsed/(cfg.rideDuration*60))*100}%`,background:"#f59e0b40",transition:"width 1s linear"}}/>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// SETUP PAGE
+// ═══════════════════════════════════════════════════════════════════════
+function SetupPage({cfg,setCfg,hrC,pwrC,neroC,hrN,pwrN,neroN,connectHR,connectPwr,connectNero,history,onStart,onSim,onNav}){
+  const CB=({conn,name,label,fn,color})=>(
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 0",borderBottom:"1px solid #1e293b"}}>
+      <div style={{display:"flex",alignItems:"center"}}><Dot on={conn}/><span style={{fontSize:15,fontWeight:600}}>{label}</span>{conn&&<span style={{fontSize:12,color:"#64748b",marginLeft:10}}>{name}</span>}</div>
+      <button onClick={conn?undefined:fn} disabled={conn} style={{padding:"8px 18px",borderRadius:8,border:`1px solid ${conn?color:"#334155"}`,background:conn?color+"22":"transparent",color:conn?color:"#64748b",fontSize:13,fontWeight:600,cursor:conn?"default":"pointer",fontFamily:"inherit"}}>{conn?"✓ Connected":"Connect"}</button>
+    </div>
+  );
+  const durs=[30,45,60,90,120];
+  const modes=[{k:"hr",l:"HR",d:"Follows heart rate"},{k:"power",l:"POWER",d:"Follows Stages power"},{k:"dual",l:"DUAL",d:"Power + HR ceiling"}];
+  return(
+    <div style={{maxWidth:480,margin:"0 auto",padding:"20px 16px",minHeight:"100vh",display:"flex",flexDirection:"column"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:20}}>
+        <div>
+          <div style={{fontSize:28,fontWeight:900,color:"#f59e0b",fontFamily:MONO}}>Z2 CTRL</div>
+          <div style={{fontSize:9,color:"#475569",letterSpacing:"3px"}}>ZONE 2 TRAINER v1.0</div>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <a href="https://richardmcdowall-glitch.github.io/ClaudeFit/" style={{textDecoration:"none",padding:"6px 10px",borderRadius:10,background:"rgba(245,197,24,0.15)",display:"flex",alignItems:"center",gap:4}}>
+            <span style={{fontSize:16}}>🏋️</span><span style={{fontSize:9,color:"#f5c518",fontWeight:600}}>Fit</span></a>
+          <button onClick={()=>onNav("settings")} style={{background:"none",border:"none",color:"#475569",fontSize:22,cursor:"pointer",padding:8}}>⚙</button>
+        </div>
+      </div>
+      <Card style={{padding:"4px 18px"}}>
+        <CB conn={hrC} name={hrN} label="HR Strap" fn={connectHR} color="#ef4444"/>
+        <CB conn={pwrC} name={pwrN} label="Stages Power" fn={connectPwr} color="#f59e0b"/>
+        <CB conn={neroC} name={neroN} label="Elite Nero" fn={connectNero} color="#8b5cf6"/>
+      </Card>
+      <div style={{marginBottom:16}}>
+        <Label>RIDE DURATION</Label>
+        <div style={{display:"flex",gap:6}}>
+          {durs.map(d=><button key={d} onClick={()=>setCfg(c=>({...c,rideDuration:d}))} style={{flex:1,padding:"12px 0",borderRadius:8,border:"none",background:cfg.rideDuration===d?"#22c55e":"#1e293b",color:cfg.rideDuration===d?"#0a0e17":"#64748b",fontSize:16,fontWeight:700,cursor:"pointer",fontFamily:MONO}}>{d}</button>)}
+        </div>
+        <div style={{fontSize:11,color:"#475569",marginTop:4,textAlign:"center"}}>minutes</div>
+      </div>
+      <div style={{marginBottom:16}}>
+        <Label>Z2 CONTROL</Label>
+        {modes.map(m=><button key={m.k} onClick={()=>setCfg(c=>({...c,controlMode:m.k}))} style={{display:"flex",alignItems:"center",justifyContent:"space-between",width:"100%",padding:"12px 16px",marginBottom:5,borderRadius:8,border:cfg.controlMode===m.k?"1px solid #f59e0b40":"1px solid #1e293b",background:cfg.controlMode===m.k?"#22c55e12":"#161a23",cursor:"pointer",fontFamily:"inherit"}}>
+          <span style={{fontSize:15,fontWeight:700,color:cfg.controlMode===m.k?"#22c55e":"#94a3b8",fontFamily:MONO}}>{m.l}</span>
+          <span style={{fontSize:11,color:"#475569"}}>{m.d}</span>
+        </button>)}
+      </div>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",background:"#161a23",borderRadius:8,padding:"12px 16px",marginBottom:12}}>
+        <div><div style={{fontSize:14,fontWeight:600}}>Voice Coach</div><div style={{fontSize:11,color:"#475569"}}>Technique cues &amp; encouragement</div></div>
+        <button onClick={()=>setCfg(c=>({...c,voiceEnabled:!c.voiceEnabled}))} style={{width:50,height:28,borderRadius:14,border:"none",position:"relative",cursor:"pointer",background:cfg.voiceEnabled?"#22c55e":"#334155",transition:"background 0.2s"}}>
+          <div style={{width:22,height:22,borderRadius:"50%",background:"#fff",position:"absolute",top:3,left:cfg.voiceEnabled?25:3,transition:"left 0.2s"}}/>
+        </button>
+      </div>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        <button onClick={()=>onNav("history")} style={{flex:1,background:"none",border:"1px solid #1e293b",color:"#475569",fontSize:12,cursor:"pointer",fontFamily:"inherit",padding:"10px 0",borderRadius:8}}>📊 History ({history.length})</button>
+        <button onClick={()=>onNav("diag")} style={{flex:1,background:"none",border:"1px solid #1e293b",color:"#475569",fontSize:12,cursor:"pointer",fontFamily:"inherit",padding:"10px 0",borderRadius:8}}>🔧 Power Diag</button>
+        <button onClick={()=>onNav("ramp")} style={{flex:1,background:"none",border:"1px solid #ef444440",color:"#ef4444",fontSize:12,cursor:"pointer",fontFamily:"inherit",padding:"10px 0",borderRadius:8}}>⚡ Ramp Test</button>
+      </div>
+      <div style={{flex:1,minHeight:20}}/>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={onStart} style={{flex:1,padding:"18px 0",borderRadius:12,border:"none",background:"#f59e0b",color:"#0a0e17",fontSize:20,fontWeight:800,cursor:"pointer",fontFamily:"inherit"}}>START RIDE</button>
+        <button onClick={onSim} style={{padding:"18px 16px",borderRadius:12,border:"1px solid #f59e0b40",background:"#f59e0b15",color:"#f59e0b",fontSize:16,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>🧪 SIM</button>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MAIN APP (orchestrates state, BLE, timers, cues)
+// ═══════════════════════════════════════════════════════════════════════
+function MainApp(){
+  const[cfg,setCfg]=useState(()=>ls.get(SK.cfg,DEF_CFG));
+  const[page,setPage]=useState("setup");
+  const[history,setHistory]=useState(()=>ls.get(SK.hist,[]));
+
+  // BLE state
+  const[hrC,setHrC]=useState(false);const[pwrC,setPwrC]=useState(false);const[neroC,setNeroC]=useState(false);
+  const[hrN,setHrN]=useState("");const[pwrN,setPwrN]=useState("");const[neroN,setNeroN]=useState("");
+  const[hr,setHr]=useState(0);const[power,setPower]=useState(0);const[cadence,setCadence]=useState(0);const[neroPwr,setNeroPwr]=useState(0);
+  const[resist,setResist]=useState(30);
+  const[neroSpeed,setNeroSpeed]=useState(0);const[neroDistance,setNeroDistance]=useState(0);
+
+  // Ride state
+  const[riding,setRiding]=useState(false);const[paused,setPaused]=useState(false);const[simMode,setSimMode]=useState(false);
+  const[elapsed,setElapsed]=useState(0);const[activeTime,setActiveTime]=useState(0);
+  const[zoneHist,setZoneHist]=useState([]);const[cadLog,setCadLog]=useState([]);const[pwrLog,setPwrLog]=useState([]);const[hrLog,setHrLog]=useState([]);const[neroPwrLog,setNeroPwrLog]=useState([]);
+  const[cueText,setCueText]=useState("");const[cueVisible,setCueVisible]=useState(false);
+  const[autoCtrl,setAutoCtrl]=useState(true);
+  const[rideData,setRideData]=useState(null);
+
+  const neroCtrl=useRef(null);const pwrBuf=useRef([]);const hrBuf=useRef([]);const crankRef=useRef({r:null,t:null});const neroPwrRef=useRef(0);
+  const neroSpeedRef=useRef(0);const neroDistRef=useRef(0);const lastCadUpdate=useRef(0);
+  const timerRef=useRef(null);const ctrlRef=useRef(null);const cueRef=useRef(null);
+  const resistRef=useRef(resist);const cadRef=useRef(cadence);const pausedRef=useRef(paused);const elapsedRef=useRef(elapsed);
+  const lastWarnRef=useRef(0);const lastCueIdx=useRef(0);const lastEncIdx=useRef(0);const autoPauseTimer=useRef(null);
+  const hrRef=useRef(hr);const pwrRef=useRef(power);
+  resistRef.current=resist;cadRef.current=cadence;pausedRef.current=paused;elapsedRef.current=elapsed;hrRef.current=hr;pwrRef.current=power;neroPwrRef.current=neroPwr;neroSpeedRef.current=neroSpeed;neroDistRef.current=neroDistance;
+
+  const zones=useMemo(()=>mkZones(cfg.maxHR,cfg.restHR),[cfg.maxHR,cfg.restHR]);
+  const z2=zones.find(z=>z.zone===2);
+
+  // Persist config
+  useEffect(()=>{ls.set(SK.cfg,cfg)},[cfg]);
+
+  // Screen wake lock — prevent screen timeout during rides
+  const wakeLockRef=useRef(null);
+  useEffect(()=>{
+    if(riding&&navigator.wakeLock){
+      navigator.wakeLock.request("screen").then(wl=>{wakeLockRef.current=wl}).catch(()=>{});
+    }
+    return()=>{if(wakeLockRef.current){wakeLockRef.current.release().catch(()=>{});wakeLockRef.current=null}};
+  },[riding]);
+
+  // ── BLE connections ─────────────────────────────────────────────────
+  const connectHR=async()=>{try{
+    const d=await navigator.bluetooth.requestDevice({filters:[{services:[BLE.HR]}]});
+    const s=await(await d.gatt.connect()).getPrimaryService(BLE.HR);
+    const c=await s.getCharacteristic(BLE.HR_CH);await c.startNotifications();
+    c.addEventListener("characteristicvaluechanged",e=>{const v=e.target.value,f=v.getUint8(0);const b=(f&1)?v.getUint16(1,true):v.getUint8(1);setHr(b);hrBuf.current.push(b);if(hrBuf.current.length>10)hrBuf.current.shift()});
+    d.addEventListener("gattserverdisconnected",()=>{setHrC(false);setHrN("")});
+    setHrC(true);setHrN(d.name||"HR");
+  }catch(e){console.warn("HR:",e)}};
+
+  const connectPwr=async()=>{try{
+    const d=await navigator.bluetooth.requestDevice({filters:[{services:[BLE.PWR]}]});
+    const s=await(await d.gatt.connect()).getPrimaryService(BLE.PWR);
+    const c=await s.getCharacteristic(BLE.PWR_CH);await c.startNotifications();
+    c.addEventListener("characteristicvaluechanged",e=>{
+      const v=e.target.value,fl=v.getUint16(0,true),w=Math.max(0,v.getInt16(2,true));
+      setPower(w);pwrBuf.current.push(w);if(pwrBuf.current.length>5)pwrBuf.current.shift();
+      if(fl&0x20){let o=4;if(fl&1)o+=1;if(fl&4)o+=2;if(fl&0x10)o+=6;if(v.byteLength>=o+4){
+        const cr=v.getUint16(o,true),ct=v.getUint16(o+2,true),p=crankRef.current;
+        if(p.r!==null){let dR=cr-p.r;if(dR<0)dR+=65536;let dT=ct-p.t;if(dT<0)dT+=65536;
+        if(dT>0&&dR>0){const rpm=Math.round((dR/(dT/1024))*60);if(rpm>0&&rpm<200){setCadence(rpm);lastCadUpdate.current=Date.now()}}}
+        crankRef.current={r:cr,t:ct};
+      }}
+    });
+    d.addEventListener("gattserverdisconnected",()=>{setPwrC(false);setPwrN("")});
+    setPwrC(true);setPwrN(d.name||"Power");
+  }catch(e){console.warn("PWR:",e)}};
+
+  const connectNero=async()=>{try{
+    const d=await navigator.bluetooth.requestDevice({filters:[{services:[BLE.FTMS]}],optionalServices:[BLE.PWR]});
+    const srv=await d.gatt.connect();
+    // FTMS control
+    const fs=await srv.getPrimaryService(BLE.FTMS);
+    const ct=await fs.getCharacteristic(BLE.FTMS_CTRL);neroCtrl.current=ct;
+    await ct.startNotifications();
+    ct.addEventListener("characteristicvaluechanged",()=>{});
+    await ct.writeValue(buildRC());await new Promise(r=>setTimeout(r,500));await ct.writeValue(buildStart());
+    // Always try Indoor Bike Data for speed, distance, and fallback power
+    try{
+      const ib=await fs.getCharacteristic("00002ad2-0000-1000-8000-00805f9b34fb");
+      await ib.startNotifications();
+      let hasPwrFromCPS=false;
+      ib.addEventListener("characteristicvaluechanged",e=>{
+        const v=e.target.value,fl=v.getUint16(0,true);let off=2;
+        // Bit 0 inverted: 0=speed present, 1=speed NOT present
+        if(!(fl&0x01)){const spd=v.getUint16(off,true)*0.01;setNeroSpeed(spd);off+=2}
+        if(fl&0x02)off+=2; // avg speed
+        if(fl&0x04)off+=2; // instantaneous cadence
+        if(fl&0x08)off+=2; // avg cadence
+        if(fl&0x10&&v.byteLength>=off+3){
+          const d0=v.getUint8(off),d1=v.getUint8(off+1),d2=v.getUint8(off+2);
+          const dist=(d0|(d1<<8)|(d2<<16))/1000; // metres → km
+          setNeroDistance(dist);off+=3;
+        }
+        if(fl&0x20)off+=2; // resistance level
+        if(fl&0x40&&v.byteLength>=off+2){
+          const w=Math.max(0,v.getInt16(off,true));
+          if(!hasPwrFromCPS)setNeroPwr(w);
+          off+=2;
+        }
+      });
+    }catch{}
+    // Also try CPS power (more accurate than FTMS power)
+    try{
+      const ps=await srv.device.gatt.getPrimaryService(BLE.PWR);
+      const pc=await ps.getCharacteristic(BLE.PWR_CH);await pc.startNotifications();
+      pc.addEventListener("characteristicvaluechanged",e=>{const w=Math.max(0,e.target.value.getInt16(2,true));setNeroPwr(w)});
+    }catch{}
+    d.addEventListener("gattserverdisconnected",()=>{setNeroC(false);setNeroN("");neroCtrl.current=null});
+    setNeroC(true);setNeroN(d.name||"Nero");
+  }catch(e){console.warn("Nero:",e)}};
+
+  const sendR=useCallback(async p=>{const c=clamp(Math.round(p),0,100);setResist(c);if(!neroCtrl.current)return;try{await neroCtrl.current.writeValue(buildRes(c))}catch(e){console.warn("R:",e)}},[]);
+
+  // ── Show cue ───────────────────────────────────────────────────────
+  const showCue=useCallback((text,doSpeak=true,showText=false)=>{
+    if(showText){setCueText(text);setCueVisible(true);setTimeout(()=>setCueVisible(false),8000)}
+    if(doSpeak&&cfg.voiceEnabled)speak(text,cfg.voiceRate,cfg.voiceVolume);
+  },[cfg.voiceEnabled,cfg.voiceRate,cfg.voiceVolume]);
+
+  // ── Simulator ─────────────────────────────────────────────────────
+  const simRef=useRef(null);
+  useEffect(()=>{
+    if(simRef.current)clearInterval(simRef.current);
+    if(!simMode||!riding)return;
+    let baseHR=130,basePwr=135,baseCad=82,tick=0;
+    simRef.current=setInterval(()=>{
+      if(pausedRef.current)return;tick++;
+      const hrDrift=Math.min(tick*0.02,12),hrNoise=(Math.random()-0.5)*6,hrSpike=(tick%90<3)?Math.random()*15:0;
+      const sH=Math.round(clamp(baseHR+hrDrift+hrNoise+hrSpike,85,175));
+      setHr(sH);hrBuf.current.push(sH);if(hrBuf.current.length>10)hrBuf.current.shift();
+      const sP=Math.round(clamp(basePwr+(Math.random()-0.5)*30,60,220));
+      setPower(sP);pwrBuf.current.push(sP);if(pwrBuf.current.length>5)pwrBuf.current.shift();
+      setNeroPwr(Math.round(clamp(sP-12+(Math.random()-0.5)*6,50,210))); // Nero reads ~12W lower
+      setNeroSpeed(parseFloat((24+Math.random()*4).toFixed(1))); // ~24-28 km/h
+      setNeroDistance(parseFloat((tick*0.007).toFixed(2))); // ~25km/hr
+      const cadDrop=(tick%120>=118);
+      const simCad=cadDrop?0:clamp(baseCad+Math.round((Math.random()-0.5)*8),60,110);
+      setCadence(simCad);if(simCad>0)lastCadUpdate.current=Date.now();
+    },1000);
+    return()=>clearInterval(simRef.current);
+  },[simMode,riding]);
+
+  // ── Cadence timeout (zero if no crank update for 3s) ────────────
+  useEffect(()=>{
+    if(!riding)return;
+    const cadTimer=setInterval(()=>{
+      if(lastCadUpdate.current>0&&Date.now()-lastCadUpdate.current>3000){
+        setCadence(0);
+      }
+    },1000);
+    return()=>clearInterval(cadTimer);
+  },[riding]);
+
+  // ── Auto-pause ────────────────────────────────────────────────────
+  useEffect(()=>{
+    if(!riding)return;
+    if(cadence===0&&!paused){
+      if(!autoPauseTimer.current)autoPauseTimer.current=setTimeout(()=>{setPaused(true);showCue("Paused — start pedalling to resume",true,true)},5000);
+    }else{
+      if(autoPauseTimer.current){clearTimeout(autoPauseTimer.current);autoPauseTimer.current=null}
+      if(paused&&cadence>0)setPaused(false);
+    }
+    return()=>{if(autoPauseTimer.current){clearTimeout(autoPauseTimer.current);autoPauseTimer.current=null}};
+  },[riding,cadence,paused,showCue]);
+
+  // ── Timer ─────────────────────────────────────────────────────────
+  useEffect(()=>{
+    if(timerRef.current)clearInterval(timerRef.current);
+    if(!riding)return;
+    timerRef.current=setInterval(()=>{
+      if(pausedRef.current)return;
+      setElapsed(t=>{const next=t+1;elapsedRef.current=next;
+        setActiveTime(a=>a+1);setCadLog(p=>[...p,cadRef.current]);setPwrLog(p=>[...p,pwrRef.current]);setHrLog(p=>[...p,hrRef.current]);setNeroPwrLog(p=>[...p,neroPwrRef.current]);
+        if(next>0&&next%60===0){const ah=avg(hrBuf.current);setZoneHist(p=>[...p,getZone(ah,zones).zone])}
+        return next;});
+    },1000);
+    return()=>clearInterval(timerRef.current);
+  },[riding,zones]);
+
+  // ── Auto resistance (with 30s cooldown after each adjustment) ─────
+  const lastAdjustRef=useRef(0);
+  useEffect(()=>{
+    if(ctrlRef.current)clearInterval(ctrlRef.current);
+    if(!autoCtrl||!riding)return;
+    ctrlRef.current=setInterval(()=>{
+      if(pausedRef.current||elapsedRef.current<60)return;
+      const now=Date.now();
+      if(now-lastAdjustRef.current<30000)return; // 30s cooldown
+      const mode=cfg.controlMode,step=cfg.resistanceStep;
+      const aP=avg(pwrBuf.current),aH=avg(hrBuf.current);
+      let r=resistRef.current;
+      if(mode==="power"||mode==="dual"){if(aP>cfg.z2PowerHigh+5)r-=step;else if(aP<cfg.z2PowerLow-5)r+=step}
+      if(mode==="hr"){if(z2){if(aH>z2.hi+2)r-=step;else if(aH<z2.lo-2)r+=step}}
+      if(mode==="dual"&&z2&&aH>z2.hi+3)r-=step*2;
+      const nr=clamp(r,0,55);if(nr!==resistRef.current){sendR(nr);lastAdjustRef.current=now}
+    },cfg.adjustIntervalMs);
+    return()=>clearInterval(ctrlRef.current);
+  },[autoCtrl,riding,cfg,z2,sendR]);
+
+  // ── Cue cycle ─────────────────────────────────────────────────────
+  useEffect(()=>{
+    if(cueRef.current)clearInterval(cueRef.current);
+    if(!riding||!cfg.voiceEnabled)return;
+    const interval=simMode?15000:cfg.cueMins*60*1000;
+    const silenceSec=simMode?10:60;
+    let tick=0;
+    const first=setTimeout(()=>{if(elapsedRef.current>=silenceSec&&!pausedRef.current)showCue(ENCR[0]);},(silenceSec+2)*1000);
+    cueRef.current=setInterval(()=>{
+      if(pausedRef.current||elapsedRef.current<silenceSec)return;tick++;
+      const hydroCheck=simMode?(tick%4===0):(elapsedRef.current>0&&elapsedRef.current%(15*60)<5);
+      if(hydroCheck){showCue(HYDRA[Math.floor(Math.random()*HYDRA.length)]);return}
+      if(tick%2===0){lastCueIdx.current=(lastCueIdx.current+1)%TECH.length;showCue(TECH[lastCueIdx.current])}
+      else{lastEncIdx.current=(lastEncIdx.current+1)%ENCR.length;showCue(ENCR[lastEncIdx.current])}
+    },interval);
+    return()=>{clearInterval(cueRef.current);clearTimeout(first)};
+  },[riding,cfg.voiceEnabled,cfg.cueMins,simMode,showCue]);
+
+  // ── Z2 warning ────────────────────────────────────────────────────
+  useEffect(()=>{
+    if(!riding||!cfg.voiceEnabled||paused||!z2)return;
+    const silenceSec=simMode?10:60;if(elapsed<silenceSec)return;
+    if(hr>z2.hi){const now=Date.now(),cd=simMode?10000:30000;
+      if(now-lastWarnRef.current>cd){lastWarnRef.current=now;showCue(Z2W[Math.floor(Math.random()*Z2W.length)],true,true)}}
+  },[hr,riding,cfg.voiceEnabled,paused,elapsed,z2,simMode,showCue]);
+
+  // ── Start/stop helpers ─────────────────────────────────────────────
+  const resetRide=()=>{setElapsed(0);setActiveTime(0);setZoneHist([]);setCadLog([]);setPwrLog([]);setHrLog([]);setNeroPwrLog([]);setNeroDistance(0);setNeroSpeed(0);lastWarnRef.current=0;lastCueIdx.current=Math.floor(Math.random()*TECH.length);lastEncIdx.current=Math.floor(Math.random()*ENCR.length)};
+  const startRide=(sim)=>{setSimMode(sim);if(sim){setHrC(true);setHrN("SIM");setPwrC(true);setPwrN("SIM");setNeroC(true);setNeroN("SIM")}resetRide();setRiding(true);setPaused(false);setAutoCtrl(true);setPage("ride")};
+  const stopRide=()=>{setRiding(false);setAutoCtrl(false);setRideData({elapsed:elapsedRef.current,activeTime,pwrLog,hrLog,cadLog,zoneHist,neroPwrLog,neroDistance:neroDistRef.current,neroSpeed:neroSpeedRef.current});setPage("summary")};
+
+  // ── Render ────────────────────────────────────────────────────────
+  const saveFtp=(v)=>{setCfg(c=>({...c,ftp:v}))};
+
+  // ── Render ────────────────────────────────────────────────────────
+  if(page==="settings")return<SettingsPage cfg={cfg} setCfg={setCfg} zones={zones} onBack={()=>setPage("setup")}/>;
+  if(page==="history")return<HistoryPage history={history} setHistory={setHistory} onBack={()=>setPage("setup")}/>;
+  if(page==="diag")return<DiagPage onBack={()=>setPage("setup")}/>;
+  if(page==="ramp")return<RampTestPage cfg={cfg} hr={hr} power={power} neroPwr={neroPwr} cadence={cadence} onSaveFtp={saveFtp} onBack={()=>setPage("setup")}/>;
+  if(page==="ride")return<RidePage cfg={cfg} zones={zones} hr={hr} power={power} cadence={cadence} neroPwr={neroPwr} pwrLog={pwrLog} neroPwrLog={neroPwrLog} hrLog={hrLog} riding={riding} paused={paused} setPaused={setPaused} elapsed={elapsed} activeTime={activeTime} zoneHist={zoneHist} resist={resist} sendR={sendR} autoCtrl={autoCtrl} simMode={simMode} onStop={stopRide} showCue={showCue} cueText={cueText} cueVisible={cueVisible}/>;
+  if(page==="summary"&&rideData)return<SummaryPage ride={rideData} history={history} setHistory={setHistory} cfg={cfg} onBack={()=>setPage("setup")}/>;
+  return<SetupPage cfg={cfg} setCfg={setCfg} hrC={hrC} pwrC={pwrC} neroC={neroC} hrN={hrN} pwrN={pwrN} neroN={neroN} connectHR={connectHR} connectPwr={connectPwr} connectNero={connectNero} history={history} onStart={()=>startRide(false)} onSim={()=>startRide(true)} onNav={setPage}/>;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// ROOT (PIN → APP)
+// ═══════════════════════════════════════════════════════════════════════
+function App(){
+  const[unlocked,setUnlocked]=useState(()=>{const pin=ls.getRaw(SK.pin);return !pin});
+  if(!unlocked)return<PinGate onUnlock={()=>setUnlocked(true)}/>;
+  return<MainApp/>;
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
